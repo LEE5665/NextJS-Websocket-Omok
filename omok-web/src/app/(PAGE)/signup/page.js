@@ -35,8 +35,6 @@ export default function SignupPage() {
     try {
       setSubmitting(true);
       await api.post("/api/auth/signup", { username: u, password });
-
-      // 가입 성공하면 바로 로그인 시도(UX 편함)
       await api.post("/api/auth/login", { username: u, password });
 
       setOk(true);

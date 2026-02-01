@@ -5,8 +5,19 @@ import crypto from "crypto";
 import { ACCESS_COOKIE } from "@/lib/cookies";
 import { verifyAccessToken } from "@/lib/auth";
 
-const roomKey = (id) => `room:${id}`;
-const membersKey = (id) => `room:${id}:members`;
+const roomKey = (id) => `room:${id}`;            // HASH
+const membersKey = (id) => `room:${id}:members`; // SET
+const readyKey = (id) => `room:${id}:ready`;     // HASH
+const gameKey = (id) => `room:${id}:game`;       // HASH
+
+const GAME_SIZE = 15;
+
+function emptyBoard(size) {
+  return Array.from({ length: size }, () => Array(size).fill(0));
+}
+function boardToString(board) {
+  return JSON.stringify(board);
+}
 
 function getCookieFromHeader(cookieHeader, name) {
   if (!cookieHeader) return null;
@@ -28,24 +39,27 @@ export async function GET(req) {
     ids.forEach((id) => {
       p.hgetall(roomKey(id));
       p.scard(membersKey(id));
+      p.hget(gameKey(id), "status");  // status는 game.status
     });
 
     const res = await p.exec();
 
     const rooms = [];
     for (let i = 0; i < ids.length; i++) {
-      const hash = res[i * 2]?.[1] ?? {};
-      const onlineCount = Number(res[i * 2 + 1]?.[1] ?? 0);
+      const hash = res[i * 3]?.[1] ?? {};
+      const onlineCount = Number(res[i * 3 + 1]?.[1] ?? 0);
+      const gameStatus = String(res[i * 3 + 2]?.[1] ?? "waiting");
+
       if (!hash?.id) continue;
 
       rooms.push({
         id: hash.id,
         title: hash.title ?? "",
         isPrivate: hash.isPrivate === "1",
-        status: hash.status ?? "waiting",
         maxPlayers: Number(hash.maxPlayers ?? 2),
         createdAt: Number(hash.createdAt ?? 0),
         onlineCount,
+        status: gameStatus || "waiting", // 여기서 보여줄 상태
       });
     }
 
@@ -64,7 +78,7 @@ export async function POST(req) {
     if (!token) return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
 
     const payload = await verifyAccessToken(token);
-    const ownerId = String(payload.sub);
+    const ownerId = String(payload.username);
 
     // body
     const body = await req.json().catch(() => ({}));
@@ -73,26 +87,43 @@ export async function POST(req) {
 
     if (!title) return NextResponse.json({ ok: false, error: "title_required" }, { status: 400 });
 
-    // Redis 저장
+    // create
     const id = crypto.randomUUID();
     const createdAt = Date.now();
 
+    const ttlSec = 60 * 60 * 2; // 2h
+
     const p = redis.pipeline();
+
     p.hset(roomKey(id), {
       id,
       title,
       ownerId,
       isPrivate: isPrivate ? "1" : "0",
-      status: "waiting",
       maxPlayers: "2",
       createdAt: String(createdAt),
     });
     p.zadd("rooms", createdAt, id);
+
     p.sadd(membersKey(id), ownerId);
 
-    // TTL 2시간
-    p.expire(roomKey(id), 60 * 60 * 2);
-    p.expire(membersKey(id), 60 * 60 * 2);
+    p.hset(gameKey(id), {
+      status: "waiting",
+      size: String(GAME_SIZE),
+      board: boardToString(emptyBoard(GAME_SIZE)),
+      turn: "black",
+      black: "",
+      white: "",
+      winner: "",
+      lastX: "",
+      lastY: "",
+    });
+
+    // TTL
+    p.expire(roomKey(id), ttlSec);
+    p.expire(membersKey(id), ttlSec);
+    p.expire(readyKey(id), ttlSec);
+    p.expire(gameKey(id), ttlSec);
 
     await p.exec();
 

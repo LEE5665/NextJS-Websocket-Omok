@@ -1,21 +1,15 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import axios from "axios";
-import { io } from "socket.io-client";
+import { useRouter } from "next/navigation";
+import { useSocket } from "@/components/SocketProvider";
+import { useAuth } from "@/components/AuthProvider";
 
 export default function HomePage() {
-  const api = useMemo(() => {
-    return axios.create({
-      baseURL: "",
-      withCredentials: true, // HttpOnly 쿠키 자동 포함
-      headers: { "Content-Type": "application/json" },
-      timeout: 8000,
-    });
-  }, []);
+  const router = useRouter();
+  const socket = useSocket();
 
-  const [me, setMe] = useState(null);
-  const [loadingMe, setLoadingMe] = useState(true);
+  const { user: me, loading: loadingMe, api, refreshMe } = useAuth();
 
   const [rooms, setRooms] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(true);
@@ -29,32 +23,23 @@ export default function HomePage() {
   const [newTitle, setNewTitle] = useState("");
   const [newPrivate, setNewPrivate] = useState(false);
   const [newPassword, setNewPassword] = useState("");
-  const [socket, setSocket] = useState(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const { data } = await api.get("/api/auth/me");
-        setMe(data?.user ?? null);
-      } catch {
-        setMe(null);
-      } finally {
-        setLoadingMe(false);
-      }
-    })();
-  }, [api]);
+  // lobby side
+  const [lobbyUsers, setLobbyUsers] = useState([]);
+  const [lobbyMsg, setLobbyMsg] = useState([]);
+  const [chatText, setChatText] = useState("");
+  const [inviteToast, setInviteToast] = useState(null); // {from, roomId, ts}
 
+  // ---- rooms ----
   async function fetchRooms() {
     setLoadingRooms(true);
     setErrorRooms("");
     try {
       const { data } = await api.get("/api/rooms");
       setRooms(Array.isArray(data?.rooms) ? data.rooms : []);
-    } catch (e) {
+    } catch {
       setRooms([]);
-      setErrorRooms(
-        "오류가 있어요."
-      );
+      setErrorRooms("오류가 있어요.");
     } finally {
       setLoadingRooms(false);
     }
@@ -62,6 +47,7 @@ export default function HomePage() {
 
   useEffect(() => {
     fetchRooms();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filteredRooms = useMemo(() => {
@@ -69,9 +55,7 @@ export default function HomePage() {
     return rooms
       .filter((r) => {
         if (!q) return true;
-        return String(r.title ?? "")
-          .toLowerCase()
-          .includes(q);
+        return String(r.title ?? "").toLowerCase().includes(q);
       })
       .filter((r) => {
         if (!onlyWaiting) return true;
@@ -79,15 +63,19 @@ export default function HomePage() {
       });
   }, [rooms, query, onlyWaiting]);
 
+  // ---- auth ----
   async function onLogout() {
     try {
       await api.post("/api/auth/logout");
-      setMe(null);
     } catch {
       // ignore
+    } finally {
+      // 전역 상태 갱신 (user=null로 바뀌면 SocketProvider가 자동 disconnect)
+      await refreshMe();
     }
   }
 
+  // ---- create room ----
   async function onCreateRoom() {
     const title = newTitle.trim();
     if (!title) return;
@@ -99,9 +87,64 @@ export default function HomePage() {
     });
 
     if (!data?.ok) return alert("방 생성 실패");
-    window.location.href = `/room/${data.roomId}`;
+    router.push(`/room/${data.roomId}`);
   }
 
+  // ---- lobby socket wiring ----
+  useEffect(() => {
+    if (!socket) return;
+
+    const syncLobby = () => {
+      socket.emit("lobby:sync", {}, (ack) => {
+        if (ack?.ok) setLobbyUsers(Array.isArray(ack.users) ? ack.users : []);
+      });
+    };
+
+    const onChanged = () => syncLobby();
+    const onLobbyChat = (m) => {
+      setLobbyMsg((prev) => [...prev, m].slice(-100));
+    };
+    const onInvite = (inv) => setInviteToast(inv);
+
+    let t;
+    const onRoomsChanged = () => {
+      clearTimeout(t);
+      t = setTimeout(() => {
+        fetchRooms();
+      }, 150);
+    };
+
+    socket.on("lobby:changed", onChanged);
+    socket.on("lobby:chat", onLobbyChat);
+    socket.on("invite:received", onInvite);
+    socket.on("rooms:changed", onRoomsChanged);
+
+    // 로비 입장 + 초기 sync
+    socket.emit("lobby:join", {}, () => { });
+    syncLobby();
+
+    return () => {
+      socket.off("lobby:changed", onChanged);
+      socket.off("lobby:chat", onLobbyChat);
+      socket.off("invite:received", onInvite);
+      socket.off("rooms:changed", onRoomsChanged);
+      clearTimeout(t);
+    };
+  }, [socket]);
+
+  // ---- lobby actions ----
+  function sendLobbyChat() {
+    if (!socket) return;
+    if (!me) return alert("로그인이 필요해요.");
+
+    const text = chatText.trim();
+    if (!text) return;
+
+    socket.emit("lobby:chat", { text }, (ack) => {
+      if (ack?.ok) setChatText("");
+      else alert(ack?.error || "chat_failed");
+    });
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -123,9 +166,7 @@ export default function HomePage() {
               <>
                 <div className="hidden text-sm text-slate-300 sm:block">
                   <span className="text-slate-500">Signed in as </span>
-                  <span className="font-medium text-slate-100">
-                    {me.username}
-                  </span>
+                  <span className="font-medium text-slate-100">{me.username}</span>
                 </div>
                 <button
                   onClick={() => setOpenCreate(true)}
@@ -168,9 +209,7 @@ export default function HomePage() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <h1 className="text-xl font-semibold">방 목록</h1>
-                <p className="mt-1 text-sm text-slate-400">
-                  공개/비공개 방을 찾아 입장하세요.
-                </p>
+                <p className="mt-1 text-sm text-slate-400">공개/비공개 방을 찾아 입장하세요.</p>
               </div>
 
               <div className="flex items-center gap-2">
@@ -213,9 +252,6 @@ export default function HomePage() {
               ) : errorRooms ? (
                 <div className="rounded-xl border border-amber-900/40 bg-amber-950/20 p-6 text-sm text-amber-200">
                   {errorRooms}
-                  <div className="mt-2 text-amber-300/80">
-                    다음에 /api/rooms만 붙이면 목록이 바로 살아나요.
-                  </div>
                 </div>
               ) : filteredRooms.length === 0 ? (
                 <div className="rounded-xl border border-slate-800 bg-slate-950 p-6 text-sm text-slate-400">
@@ -223,57 +259,71 @@ export default function HomePage() {
                 </div>
               ) : (
                 <ul className="grid gap-3">
-                  {filteredRooms.map((r) => (
-                    <li
-                      key={r.id}
-                      className="rounded-2xl border border-slate-800 bg-slate-950 p-4 hover:bg-slate-900/30"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <h3 className="truncate text-base font-semibold">
-                              {r.title}
-                            </h3>
-                            {r.isPrivate ? (
-                              <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-300">
-                                비공개
-                              </span>
-                            ) : (
+                  {filteredRooms.map((r) => {
+                    const status = r.status ?? "waiting";
+                    const isFull = Number(r.onlineCount ?? 0) >= Number(r.maxPlayers ?? 2);
+                    const isPlaying = status === "playing";
+                    return (
+                      <li
+                        key={r.id}
+                        className="rounded-2xl border border-slate-800 bg-slate-950 p-4 hover:bg-slate-900/30"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <h3 className="truncate text-base font-semibold">{r.title}</h3>
+                              {r.isPrivate ? (
+                                <span className="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-300">
+                                  비공개
+                                </span>
+                              ) : (
+                                <span className="rounded-full border border-slate-800 px-2 py-0.5 text-xs text-slate-400">
+                                  공개
+                                </span>
+                              )}
                               <span className="rounded-full border border-slate-800 px-2 py-0.5 text-xs text-slate-400">
-                                공개
+                                {(() => {
+                                  const status = r.status ?? "waiting";
+                                  return status === "waiting"
+                                    ? "대기"
+                                    : status === "playing"
+                                      ? "진행"
+                                      : status === "ended"
+                                        ? "종료"
+                                        : "알수없음";
+                                })()}
                               </span>
-                            )}
-                            <span className="rounded-full border border-slate-800 px-2 py-0.5 text-xs text-slate-400">
-                              {(r.status ?? "waiting") === "waiting"
-                                ? "대기중"
-                                : "진행중"}
-                            </span>
+                            </div>
+
+                            <div className="mt-1 text-sm text-slate-400">
+                              인원{" "}
+                              <span className="text-slate-200">{r.onlineCount ?? 0}</span>/
+                              {r.maxPlayers ?? 2}
+                            </div>
                           </div>
 
-                          <div className="mt-1 text-sm text-slate-400">
-                            인원{" "}
-                            <span className="text-slate-200">
-                              {r.onlineCount ?? 0}
-                            </span>
-                            /{r.maxPlayers ?? 2}
+                          <div className="flex shrink-0 items-center gap-2">
+                            <button
+                              className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={!me || isFull || isPlaying}
+                              title={
+                                !me
+                                  ? "로그인이 필요해요"
+                                  : isFull
+                                    ? "인원이 가득 찼어요"
+                                    : isPlaying
+                                      ? "게임 진행 중인 방은 입장할 수 없어요"
+                                      : "입장"
+                              }
+                              onClick={() => router.push(`/room/${r.id}`)}
+                            >
+                              입장
+                            </button>
                           </div>
                         </div>
-
-                        <div className="flex shrink-0 items-center gap-2">
-                          <button
-                            className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                            disabled={!me}
-                            onClick={() => {
-                              // 나중에 /room/[id]로 이동
-                              window.location.href = `/room/${r.id}`;
-                            }}
-                          >
-                            입장
-                          </button>
-                        </div>
-                      </div>
-                    </li>
-                  ))}
+                      </li>
+                    )
+                  })}
                 </ul>
               )}
             </div>
@@ -281,17 +331,79 @@ export default function HomePage() {
 
           {/* Right side */}
           <aside className="space-y-6">
+            {/* Lobby chat */}
+            <section className="rounded-2xl border border-slate-800 bg-slate-950 p-5">
+              <h2 className="text-base font-semibold">로비 채팅</h2>
 
+              <div className="mt-3 h-48 overflow-auto rounded-xl border border-slate-800 p-3 text-sm">
+                {lobbyMsg.length === 0 ? (
+                  <div className="text-slate-500">아직 메시지 없음</div>
+                ) : (
+                  <div className="space-y-2">
+                    {lobbyMsg.map((m, idx) => (
+                      <div key={idx} className="break-words">
+                        <span className="text-slate-400">{m.from}:</span>{" "}
+                        <span className="text-slate-100">{m.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
 
+              <div className="mt-3 flex gap-2">
+                <input
+                  value={chatText}
+                  onChange={(e) => setChatText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") sendLobbyChat();
+                  }}
+                  className="flex-1 rounded-xl border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-400/30"
+                  placeholder="메시지..."
+                  disabled={!me}
+                />
+                <button
+                  onClick={sendLobbyChat}
+                  disabled={!me}
+                  className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-900 disabled:opacity-50"
+                >
+                  전송
+                </button>
+              </div>
+            </section>
+
+            {/* Invite toast */}
+            {inviteToast ? (
+              <section className="rounded-2xl border border-slate-800 bg-slate-950 p-5">
+                <h2 className="text-base font-semibold">초대 도착</h2>
+                <div className="mt-2 text-sm text-slate-300">
+                  <span className="text-slate-400">{inviteToast.from}</span> 님이{" "}
+                  <span className="text-slate-100">{inviteToast.roomId}</span> 방으로 초대했어요.
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <button
+                    className="rounded-xl bg-slate-100 px-3 py-2 text-sm font-semibold text-slate-900"
+                    onClick={() => {
+                      const rid = inviteToast.roomId;
+                      setInviteToast(null);
+                      router.push(`/room/${rid}`);
+                    }}
+                  >
+                    수락
+                  </button>
+                  <button
+                    className="rounded-xl border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-900"
+                    onClick={() => setInviteToast(null)}
+                  >
+                    닫기
+                  </button>
+                </div>
+              </section>
+            ) : null}
+
+            {/* Status */}
             <section className="rounded-2xl border border-slate-800 bg-slate-950 p-5">
               <h2 className="text-base font-semibold">상태</h2>
               <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-400">로그인</span>
-                  <span className="text-slate-100">
-                    {loadingMe ? "확인중" : me ? "됨" : "안됨"}
-                  </span>
-                </div>
                 <div className="mt-2 flex items-center justify-between">
                   <span className="text-slate-400">방 개수</span>
                   <span className="text-slate-100">{rooms.length}</span>
@@ -309,9 +421,7 @@ export default function HomePage() {
             <div className="flex items-start justify-between">
               <div>
                 <h3 className="text-lg font-semibold">방 만들기</h3>
-                <p className="mt-1 text-sm text-slate-400">
-                  공개/비공개를 선택할 수 있어요.
-                </p>
+                <p className="mt-1 text-sm text-slate-400">공개/비공개를 선택할 수 있어요.</p>
               </div>
               <button
                 onClick={() => setOpenCreate(false)}
@@ -323,9 +433,7 @@ export default function HomePage() {
 
             <div className="mt-4 space-y-3">
               <div>
-                <label className="mb-1 block text-xs text-slate-400">
-                  제목
-                </label>
+                <label className="mb-1 block text-xs text-slate-400">제목</label>
                 <input
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
@@ -346,9 +454,7 @@ export default function HomePage() {
 
               {newPrivate && (
                 <div>
-                  <label className="mb-1 block text-xs text-slate-400">
-                    방 비밀번호
-                  </label>
+                  <label className="mb-1 block text-xs text-slate-400">방 비밀번호</label>
                   <input
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
@@ -369,11 +475,7 @@ export default function HomePage() {
                 만들기
               </button>
 
-              {!me && (
-                <div className="text-xs text-slate-500">
-                  방 만들기는 로그인 후 가능해요.
-                </div>
-              )}
+              {!me && <div className="text-xs text-slate-500">방 만들기는 로그인 후 가능해요.</div>}
             </div>
           </div>
         </div>

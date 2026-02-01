@@ -33,7 +33,7 @@ export default function LoginPage() {
     try {
       setSubmitting(true);
       await api.post("/api/auth/login", { username: u, password });
-      window.location.href = "/"; // 로비로
+      window.location.href = "/"; // 로비로 router로 해도 될 듯
     } catch (err) {
       const msg =
         err?.response?.data?.error ||
