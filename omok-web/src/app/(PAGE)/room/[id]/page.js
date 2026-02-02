@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { useSocket } from "@/components/SocketProvider";
 
@@ -32,6 +32,11 @@ export default function RoomPage() {
   const [chatText, setChatText] = useState("");
   const [roomMsg, setRoomMsg] = useState([]);
 
+  // chat auto scroll
+  const chatBoxRef = useRef(null);
+  const chatBottomRef = useRef(null);
+  const [autoScroll, setAutoScroll] = useState(true);
+
   // game
   const [game, setGame] = useState(null);
   const [gameErr, setGameErr] = useState("");
@@ -43,13 +48,14 @@ export default function RoomPage() {
   const readyCount = members.filter((u) => !!readyMap?.[u]).length;
 
   // 시작 조건: 방장 + 2명 레디 + 게임 진행중/종료 아님
-  const canStart = isOwner && members.length >= 2 && readyCount >= 2 && !gamePlaying && !gameEnded;
+  const canStart =
+    isOwner && members.length >= 2 && readyCount >= 2 && !gamePlaying && !gameEnded;
 
   const [meName, setMeName] = useState("");
   const myReady = meName ? !!readyMap?.[meName] : false;
 
   const applyRoomSnapshot = (ack) => {
-    const title = ack?.room.title;
+    const title = ack?.room?.title || ack?.room?.title;
     if (title) setRoomName(title);
 
     if (ack?.ownerId != null) setOwnerId(ack.ownerId || "");
@@ -147,6 +153,7 @@ export default function RoomPage() {
     socket.on("room:chat", onRoomChat);
     socket.on("game:state", onGameState);
     socket.on("room:ready", onReady);
+    socket.on("room:meta", onRoomMeta);
 
     return () => {
       socket.off("room:member_joined", onJoined);
@@ -169,6 +176,11 @@ export default function RoomPage() {
     socket.on("lobby:changed", onLobbyChanged);
     return () => socket.off("lobby:changed", onLobbyChanged);
   }, [socket, roomId, isOwner, openInvite]);
+
+  useEffect(() => {
+    if (!autoScroll) return;
+    chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [roomMsg.length, autoScroll]);
 
   function openInviteModal() {
     setOpenInvite(true);
@@ -228,7 +240,7 @@ export default function RoomPage() {
   function onClickCell(x, y) {
     if (!socket) return;
     if (!game?.board) return;
-    if (gameEnded || gamePlaying === false && game?.status === "ended") return;
+    if (gameEnded || (gamePlaying === false && game?.status === "ended")) return;
 
     if (!gamePlaying) return;
 
@@ -259,9 +271,7 @@ export default function RoomPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4">
           <div className="leading-tight">
             <div className="text-sm text-slate-300">오목</div>
-            <div className="text-lg font-semibold">
-              {roomName ? roomName : `Room ${roomId}`}
-            </div>
+            <div className="text-lg font-semibold">{roomName ? roomName : `Room ${roomId}`}</div>
             <div className="mt-0.5 text-xs text-slate-500">ID: {roomId}</div>
           </div>
 
@@ -317,7 +327,9 @@ export default function RoomPage() {
 
             <div className="mt-2 text-xs text-slate-500">
               방장: <span className="text-slate-200">{ownerId || "(unknown)"}</span>
-              <span className="ml-3">준비 {readyCount}/{members.length}</span>
+              <span className="ml-3">
+                준비 {readyCount}/{members.length}
+              </span>
             </div>
 
             <div className="mt-4 space-y-2">
@@ -341,8 +353,12 @@ export default function RoomPage() {
                             {name === ownerId ? (
                               <span className="ml-2 text-xs text-slate-500">(방장)</span>
                             ) : null}
-                            {isGameBlack ? <span className="ml-2 text-xs text-slate-400">흑</span> : null}
-                            {isGameWhite ? <span className="ml-2 text-xs text-slate-400">백</span> : null}
+                            {isGameBlack ? (
+                              <span className="ml-2 text-xs text-slate-400">흑</span>
+                            ) : null}
+                            {isGameWhite ? (
+                              <span className="ml-2 text-xs text-slate-400">백</span>
+                            ) : null}
                           </div>
                         </div>
 
@@ -363,6 +379,7 @@ export default function RoomPage() {
               )}
             </div>
           </section>
+
           <div className="space-y-6">
             <section className="rounded-2xl border border-slate-800 bg-slate-950 p-5">
               <div className="flex items-center justify-between">
@@ -379,6 +396,7 @@ export default function RoomPage() {
                   ) : null}
                 </div>
               </div>
+
               {gameEnded ? (
                 <div className="mt-3 rounded-xl border border-amber-900/40 bg-amber-950/20 p-3 text-sm text-amber-200">
                   게임 끝!{" "}
@@ -391,6 +409,7 @@ export default function RoomPage() {
               ) : null}
 
               {gameErr ? <div className="mt-3 text-sm text-red-300">{gameErr}</div> : null}
+
               {game?.board ? (
                 <div className="mt-4 overflow-auto rounded-xl border border-slate-800 bg-slate-950 p-3">
                   <div style={{ minWidth: size * 28 }}>
@@ -415,7 +434,7 @@ export default function RoomPage() {
                                 "h-7 w-7 flex items-center justify-center text-sm",
                                 "bg-[#f3d59b] text-black",
                                 "hover:brightness-95",
-                                (!gamePlaying || gameEnded) ? "cursor-not-allowed opacity-70" : "",
+                                !gamePlaying || gameEnded ? "cursor-not-allowed opacity-70" : "",
                               ].join(" ")}
                               title={`${x},${y}`}
                             >
@@ -431,10 +450,20 @@ export default function RoomPage() {
                 <div className="mt-3 text-sm text-slate-500">게임 준비중…</div>
               )}
             </section>
+
             <section className="rounded-2xl border border-slate-800 bg-slate-950 p-5">
               <h2 className="text-base font-semibold">채팅</h2>
 
-              <div className="mt-3 h-56 overflow-auto rounded-xl border border-slate-800 p-3 text-sm">
+              <div
+                ref={chatBoxRef}
+                onScroll={() => {
+                  const el = chatBoxRef.current;
+                  if (!el) return;
+                  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+                  setAutoScroll(nearBottom);
+                }}
+                className="mt-3 h-56 overflow-auto rounded-xl border border-slate-800 p-3 text-sm"
+              >
                 {roomMsg.length === 0 ? (
                   <div className="text-slate-500">아직 메시지 없음</div>
                 ) : (
@@ -445,6 +474,7 @@ export default function RoomPage() {
                         <span className="text-slate-100">{m.text}</span>
                       </div>
                     ))}
+                    <div ref={chatBottomRef} />
                   </div>
                 )}
               </div>
@@ -477,9 +507,7 @@ export default function RoomPage() {
             <div className="flex items-start justify-between">
               <div>
                 <h3 className="text-lg font-semibold">로비 유저 초대</h3>
-                <p className="mt-1 text-sm text-slate-400">
-                  로비에 있는 유저에게 초대를 보냅니다.
-                </p>
+                <p className="mt-1 text-sm text-slate-400">로비에 있는 유저에게 초대를 보냅니다.</p>
               </div>
               <button
                 onClick={() => setOpenInvite(false)}

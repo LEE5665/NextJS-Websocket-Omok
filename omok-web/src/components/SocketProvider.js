@@ -16,29 +16,52 @@ export default function SocketProvider({ children }) {
   const socketRef = useRef(null);
 
   useEffect(() => {
-    // 아직 /me 로딩 중이면 아무것도 안 함
     if (loading) return;
 
-    // 로그인 안 되어 있으면 소켓 끊고 종료
-    if (!user) {
+    let alive = true;
+
+    const cleanup = () => {
       if (socketRef.current) {
         socketRef.current.disconnect();
         socketRef.current = null;
       }
       setSocket(null);
-      return;
-    }
-
-    let alive = true;
+    };
 
     (async () => {
       try {
-        // 로그인된 user가 있을 때만 ws-token 요청
-        const { data } = await api.post("/api/ws-token");
-        if (!data?.token) return;
+        const url = process.env.NEXT_PUBLIC_WS_URL;
+        if (socketRef.current?.connected || socketRef.current) {
+          cleanup();
+        }
+        if (user) {
+          const { data } = await api.post("/api/ws-token");
+          const token = data?.token;
+          if (!token) {
+            if (!alive) return;
+            cleanup();
+            return;
+          }
 
-        const s = io("http://localhost:4000", {
-          auth: { token: data.token },
+          const s = io(url, {
+            auth: { token },
+            transports: ["websocket"],
+          });
+
+          socketRef.current = s;
+          if (!alive) return;
+
+          setSocket(s);
+
+          s.on("connect_error", (e) => {
+            console.error("socket connect_error:", e?.message);
+          });
+
+          return;
+        }
+
+        const s = io(url, {
+          auth: { guest: true },
           transports: ["websocket"],
         });
 
@@ -47,25 +70,19 @@ export default function SocketProvider({ children }) {
 
         setSocket(s);
 
-        s.on("invite:received", (payload) => {
-          console.log("invite:", payload);
-        });
-
         s.on("connect_error", (e) => {
-          console.error("socket connect_error:", e?.message);
+          console.error("socket connect_error (guest):", e?.message);
         });
       } catch (e) {
         console.warn("SocketProvider init failed:", e?.message);
+        if (!alive) return;
+        cleanup();
       }
     })();
 
     return () => {
       alive = false;
-      if (socketRef.current) {
-        socketRef.current.disconnect();
-        socketRef.current = null;
-      }
-      setSocket(null);
+      cleanup();
     };
   }, [user, loading, api]);
 

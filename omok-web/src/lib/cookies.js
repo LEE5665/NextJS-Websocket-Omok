@@ -3,9 +3,9 @@ export const REFRESH_COOKIE = "refresh_token";
 
 export const cookieBase = {
   httpOnly: true,
-  sameSite: "lax",
   path: "/",
-  secure: process.env.NODE_ENV === "production",
+  secure: process.env.NODE_ENV === "production"
+  && process.env.NEXT_PUBLIC_SITE_URL?.startsWith("https://"),
 };
 
 export const accessCookie = {

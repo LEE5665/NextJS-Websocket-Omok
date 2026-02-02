@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useSocket } from "@/components/SocketProvider";
 import { useAuth } from "@/components/AuthProvider";
@@ -29,6 +29,11 @@ export default function HomePage() {
   const [lobbyMsg, setLobbyMsg] = useState([]);
   const [chatText, setChatText] = useState("");
   const [inviteToast, setInviteToast] = useState(null); // {from, roomId, ts}
+
+  // lobby chat auto scroll (no button)
+  const lobbyChatBoxRef = useRef(null);
+  const lobbyChatBottomRef = useRef(null);
+  const [lobbyAutoScroll, setLobbyAutoScroll] = useState(true);
 
   // ---- rooms ----
   async function fetchRooms() {
@@ -120,7 +125,7 @@ export default function HomePage() {
     socket.on("rooms:changed", onRoomsChanged);
 
     // 로비 입장 + 초기 sync
-    socket.emit("lobby:join", {}, () => { });
+    socket.emit("lobby:join", {}, () => {});
     syncLobby();
 
     return () => {
@@ -130,7 +135,13 @@ export default function HomePage() {
       socket.off("rooms:changed", onRoomsChanged);
       clearTimeout(t);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [socket]);
+
+  useEffect(() => {
+    if (!lobbyAutoScroll) return;
+    lobbyChatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [lobbyMsg.length, lobbyAutoScroll]);
 
   // ---- lobby actions ----
   function sendLobbyChat() {
@@ -287,10 +298,10 @@ export default function HomePage() {
                                   return status === "waiting"
                                     ? "대기"
                                     : status === "playing"
-                                      ? "진행"
-                                      : status === "ended"
-                                        ? "종료"
-                                        : "알수없음";
+                                    ? "진행"
+                                    : status === "ended"
+                                    ? "종료"
+                                    : "알수없음";
                                 })()}
                               </span>
                             </div>
@@ -310,10 +321,10 @@ export default function HomePage() {
                                 !me
                                   ? "로그인이 필요해요"
                                   : isFull
-                                    ? "인원이 가득 찼어요"
-                                    : isPlaying
-                                      ? "게임 진행 중인 방은 입장할 수 없어요"
-                                      : "입장"
+                                  ? "인원이 가득 찼어요"
+                                  : isPlaying
+                                  ? "게임 진행 중인 방은 입장할 수 없어요"
+                                  : "입장"
                               }
                               onClick={() => router.push(`/room/${r.id}`)}
                             >
@@ -322,7 +333,7 @@ export default function HomePage() {
                           </div>
                         </div>
                       </li>
-                    )
+                    );
                   })}
                 </ul>
               )}
@@ -335,7 +346,16 @@ export default function HomePage() {
             <section className="rounded-2xl border border-slate-800 bg-slate-950 p-5">
               <h2 className="text-base font-semibold">로비 채팅</h2>
 
-              <div className="mt-3 h-48 overflow-auto rounded-xl border border-slate-800 p-3 text-sm">
+              <div
+                ref={lobbyChatBoxRef}
+                onScroll={() => {
+                  const el = lobbyChatBoxRef.current;
+                  if (!el) return;
+                  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+                  setLobbyAutoScroll(nearBottom);
+                }}
+                className="mt-3 h-48 overflow-auto rounded-xl border border-slate-800 p-3 text-sm"
+              >
                 {lobbyMsg.length === 0 ? (
                   <div className="text-slate-500">아직 메시지 없음</div>
                 ) : (
@@ -346,6 +366,7 @@ export default function HomePage() {
                         <span className="text-slate-100">{m.text}</span>
                       </div>
                     ))}
+                    <div ref={lobbyChatBottomRef} />
                   </div>
                 )}
               </div>

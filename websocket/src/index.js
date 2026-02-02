@@ -243,7 +243,13 @@ async function cleanupRoom({ socket, rid, reason }) {
 io.use(async (socket, next) => {
   try {
     const wsToken = socket.handshake.auth?.token;
-    if (!wsToken) return next(new Error("missing_ws_token"));
+
+    if (!wsToken) {
+      socket.data.isGuest = true;
+      socket.data.userId = null;
+      socket.data.username = null;
+      return next();
+    }
 
     const raw = await redis.get(wsTicketKey(wsToken));
     if (!raw) return next(new Error("invalid_or_expired_ws_token"));
@@ -254,8 +260,9 @@ io.use(async (socket, next) => {
       return next(new Error("bad_ws_token_payload"));
     }
 
-    await redis.del(wsTicketKey(wsToken)); // 1회용
+    await redis.del(wsTicketKey(wsToken)); 
 
+    socket.data.isGuest = false;
     socket.data.userId = String(payload.username);
     socket.data.username = String(payload.username);
 
@@ -265,17 +272,22 @@ io.use(async (socket, next) => {
   }
 });
 
+
 io.on("connection", (socket) => {
+  const isGuest = !!socket.data.isGuest;
   const name = socket.data.userId;
+  let hb = null;
+  if (isGuest) {
+    socket.join(LOBBY_ROOM);
+  } else {
+    socket.join(userRoom(name));
+    lobbyEnter(name, socket).catch(console.error);
 
-  socket.join(userRoom(name));
-  lobbyEnter(name, socket).catch(console.error);
-
-  bumpPresence(name, socket.id).catch(console.error);
-  const hb = setInterval(() => {
-    bumpPresence(name, socket.id).catch(() => {});
-  }, HEARTBEAT_SEC * 1000);
-
+    bumpPresence(name, socket.id).catch(console.error);
+    hb = setInterval(() => {
+      bumpPresence(name, socket.id).catch(() => {});
+    }, HEARTBEAT_SEC * 1000);
+  }
   // -------- lobby --------
   socket.on("lobby:join", async (_, ack) => {
     try {
@@ -700,7 +712,11 @@ io.on("connection", (socket) => {
 
   // -------- disconnecting --------
 socket.on("disconnecting", async (reason) => {
-  clearInterval(hb);
+
+  if (hb) clearInterval(hb);
+
+  const isGuest = !!socket.data.isGuest;
+  if (isGuest) return;
   console.log("disconnecting 감지", socket.id, reason);
 
   const name = socket.data.userId;
